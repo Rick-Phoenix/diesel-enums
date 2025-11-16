@@ -2,11 +2,13 @@
 name = "diesel-enums"
 version = { workspace = true }
 
-description = "Seamless mapping between rust enums and custom postgres types or regular lookup tables, with automatically generated consistency checks."
+description = "🔢 Seamless mapping between rust enums and custom postgres types or regular lookup tables, with automatically generated consistency checks."
 
 edition.workspace = true
 license = { workspace = true }
 repository = { workspace = true }
+
+keywords = ["diesel", "enum", "postgres", "sqlite", "mysql"]
 
 readme = true
 
