@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "diesel-enums"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "deadpool-diesel",
  "deadpool-sync",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "diesel-enums-proc-macro"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bool-enum",
  "convert_case",
