@@ -46,7 +46,7 @@ commit_parsers = [
   { message = "^test", group = "<!-- 6 -->🧪 Testing" },
   { message = "^chore: beta release", skip = true },
   { message = "^chore: Release", skip = true },
-  { message = "^chore: Update changelog", skip = true },
+  { message = "^chore\\(release\\)", skip = true },
   { message = "^chore\\(deps.*\\)", skip = true },
   { message = "^chore\\(pr\\)", skip = true },
   { message = "^chore\\(pull\\)", skip = true },
