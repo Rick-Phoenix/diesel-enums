@@ -19,8 +19,7 @@ tag = true
 features = ["document-features"]
 
 [package.metadata.docs.rs]
-all-features = false
-features = ["postgres", "sqlite", "document-features"]
+all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dev-dependencies]
