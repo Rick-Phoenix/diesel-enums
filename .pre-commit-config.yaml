@@ -1,5 +1,9 @@
 repos:
-- repo: https://github.com/gitleaks/gitleaks
-  rev: v8.28.0
-  hooks:
-  - id: gitleaks
+  - repo: local
+    hooks:
+      - id: cargo-reedme
+        name: Generate README.md
+        entry: sh -c 'cargo reedme -p diesel-enums --features document-features && git add README.md'
+        language: system
+        pass_filenames: false
+        files: ^(prelude/src/lib\.rs|prelude/tests/readme_example\.rs|Cargo\.toml)$

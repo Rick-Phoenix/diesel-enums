@@ -15,12 +15,16 @@ readme = true
 [package.metadata.release]
 tag = true
 
+[package.metadata.cargo-reedme]
+features = ["document-features"]
+
+[package.metadata.docs.rs]
+all-features = false
+features = ["postgres", "sqlite", "document-features"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dev-dependencies]
-diesel_migrations = "2.3.0"
-pgtemp = "0.6.0"
-deadpool-diesel = { version = "0.6", features = ["sqlite", "postgres"] }
-deadpool-sync = "0.1.4"
-dotenvy = "0.15"
+deadpool-diesel = { version = "0.6", features = ["sqlite"] }
 diesel = { version = "2.3", features = [
   "sqlite",
   "returning_clauses_for_sqlite_3_35",
@@ -28,10 +32,10 @@ diesel = { version = "2.3", features = [
 tokio = { version = "1", features = ["full"] }
 
 [dependencies]
-document-features = "0.2"
+document-features = { version = "0.2", optional = true }
 
-diesel-enums-proc-macro = { path = "../proc-macro/", version = "0.1.0" }
-owo-colors = { version = "4", optional = true, features = ["supports-colors"] }
+diesel-enums-proc-macro = { path = "../proc-macro/", version = "0.2.0" }
+owo-colors = { version = "4", features = ["supports-colors"] }
 thiserror = "2"
 
 tokio = { version = "1", features = [
@@ -42,34 +46,41 @@ tokio = { version = "1", features = [
 deadpool-diesel = { version = "0.6", optional = true }
 deadpool-sync = { version = "0.1", optional = true }
 dotenvy = { version = "0.15", optional = true }
-diesel = { version = "2.3", optional = true }
+diesel = { version = "2.3" }
 
 [features]
 
-default = ["pretty-test-errors"]
+default = []
 
-## Enables prettified, colored output from errors
-pretty-test-errors = ["dep:owo-colors"]
+document-features = ["dep:document-features"]
 
-test-utils = []
+test-runners = ["dep:tokio", "dep:dotenvy", "dep:deadpool-diesel"]
+
+## Enables support for custom postgres enums
+postgres = ["diesel/postgres"]
 
 ## Exports the test runner for sqlite
-sqlite = [
-  "test-utils",
-  "dep:tokio",
-  "dep:dotenvy",
-  "dep:diesel",
+sqlite-async-runner = [
+  "diesel/sqlite",
+  "test-runners",
   "deadpool-diesel/sqlite",
   "dep:deadpool-sync",
-  "diesel/sqlite",
+]
+## Indicates that the sqlite runner should be used by default
+default-sqlite-runner = [
+  "sqlite-async-runner",
+  "diesel-enums-proc-macro/default-sqlite-runner",
 ]
 
 ## Exports the test runner for postgres
-postgres = [
-  "test-utils",
-  "dep:tokio",
-  "dep:dotenvy",
-  "dep:diesel",
-  "deadpool-diesel/postgres",
-  "diesel/postgres",
+pg-async-runner = ["postgres", "test-runners", "deadpool-diesel/postgres"]
+## Indicates that the postgres runner should be used by default
+default-pg-runner = [
+  "pg-async-runner",
+  "diesel-enums-proc-macro/default-pg-runner",
 ]
+
+## Indicates that the default runner is located at `crate::db_test_runner::DbTestRunner`.
+crate-runner = ["diesel-enums-proc-macro/crate-runner"]
+## Indicates that the default runner is located at `crate::db_test_runner::DbTestRunner`, and that it is an async runner.
+async-crate-runner = ["diesel-enums-proc-macro/async-crate-runner"]

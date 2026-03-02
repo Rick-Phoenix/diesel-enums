@@ -1,214 +1,213 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[macro_use]
-pub(crate) mod macros;
+use syn_utils::*;
+
+mod main_logic;
+mod pg_enum;
+
 pub(crate) mod attributes;
 pub(crate) mod conversions;
 pub(crate) mod process_variants;
-pub(crate) mod test_generation;
 
-use convert_case::{Case, Casing};
+use std::ops::Range;
+
+use bool_enum::bool_enum;
+use convert_case::{Case, Casing, ccase};
 use proc_macro::TokenStream;
 pub(crate) use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
-use syn::{parse_macro_input, Error, ItemEnum};
-
-use crate::{
-  attributes::{Attributes, IdMapping, NameMapping},
-  conversions::{
-    enum_int_conversions, enum_to_enum_conversion, postgres_enum_conversions, sql_int_conversions,
-    sql_string_conversions, to_from_str_conversions,
-  },
-  process_variants::{process_variants, VariantData},
-  test_generation::{test_with_id, test_without_id},
+use quote::{format_ident, quote, quote_spanned};
+use syn::{
+	Attribute, Ident, ItemEnum, LitStr, Path, Token, Variant, parse_macro_input, parse_quote,
+	punctuated::Punctuated,
 };
 
-enum Check {
-  Conn(TokenStream2),
-  Skip,
+use crate::{attributes::*, conversions::*, process_variants::*};
+
+fn check_features() -> syn::Result<()> {
+	let mut enabled: Vec<&str> = Vec::new();
+
+	macro_rules! check_features {
+		($($feat:literal),*) => {
+			$(
+				if cfg!(feature = $feat) {
+					enabled.push($feat);
+				}
+			)*
+		};
+	}
+
+	check_features!(
+		"default-sqlite-runner",
+		"default-pg-runner",
+		"crate-runner",
+		"async-crate-runner"
+	);
+
+	if enabled.len() > 1 {
+		bail_call_site!(
+			"Found more than one feature for the default runner: {}. Please choose only one",
+			enabled.join(", ")
+		)
+	} else {
+		Ok(())
+	}
 }
 
-fn traverse_enum<T>(variants: &[VariantData], action: T) -> TokenStream2
-where
-  T: Fn(&VariantData) -> TokenStream2,
-{
-  let mut tokens = TokenStream2::new();
-
-  for variant in variants {
-    let action_tokens = action(variant);
-    tokens.extend(action_tokens);
-  }
-
-  tokens
-}
-
-/// Maps a rust enum to a database source, which can be a custom postgres type or a common lookup table.
+/// Shortcut for deriving [`DbEnum`] on the target enum, along with the other required derives for it.
 ///
-/// By default, it also generates a method that connects to the database and checks if the mapping is fully in sync, as well as a test that calls such method and panics in case a mismatch is found.
+/// Derives [`FromSqlRow`](diesel::FromSqlRow), [`AsExpression`](diesel::AsExpression), [`Debug`](std::fmt::Debug), [`Copy`](core::marker::Copy), [`Eq`](core::cmp::Eq) and [`Hash`](core::hash::Hash).
 #[proc_macro_attribute]
-pub fn diesel_enum(attrs: TokenStream, input: TokenStream) -> TokenStream {
-  let orig_input: TokenStream2 = input.clone().into();
+pub fn db_enum(_: TokenStream, input: TokenStream) -> TokenStream {
+	let item = parse_macro_input!(input as ItemEnum);
 
-  let Attributes {
-    table_path,
-    skip_test,
-    table_name,
-    column,
-    conn,
-    case,
-    name_mapping,
-    id_mapping,
-    skip_ranges,
-  } = parse_macro_input!(attrs as Attributes);
+	match main_logic::db_enum_proc_macro(&item) {
+		Ok(tokens) => tokens.into(),
+		Err(e) => {
+			let err = e.into_compile_error();
 
-  let ast = parse_macro_input!(input as ItemEnum);
-
-  let variants_data = match process_variants(&ast.variants, case, &skip_ranges) {
-    Ok(data) => data,
-    Err(e) => return e.to_compile_error().into(),
-  };
-
-  let enum_name = &ast.ident;
-  let enum_name_str = enum_name.to_string();
-
-  let table_name = table_name.unwrap_or_else(|| enum_name_str.to_case(Case::Snake));
-  let table_path = table_path.unwrap_or_else(|| {
-    let table_name_ident = format_ident!("{table_name}");
-    quote! { crate::schema::#table_name_ident }
-  });
-  let column_name = column.as_deref().unwrap_or("name");
-
-  let mut enum_impls = TokenStream2::new();
-
-  if id_mapping.is_none() && name_mapping.is_none() {
-    return Error::new_spanned(
-      orig_input,
-      "At least one between `id_mapping` and `name_mapping` must be set",
-    )
-    .to_compile_error()
-    .into();
-  }
-
-  let is_double_mapping =
-    name_mapping.is_some() && id_mapping.is_some() && matches!(conn, Check::Conn(_));
-
-  if let Some(NameMapping {
-    path: sql_type_path,
-    db_type,
-  }) = &name_mapping
-  {
-    enum_impls.extend(quote! {
-      #[derive(PartialEq, Eq, Clone, Copy, Hash, diesel_enums::MappedEnum, Debug, diesel::deserialize::FromSqlRow, diesel::expression::AsExpression)]
-      #[diesel(sql_type = #sql_type_path)]
-      #orig_input
-    });
-
-    let is_custom_type = db_type.is_custom();
-
-    let to_from_str_conversions = to_from_str_conversions(enum_name, &variants_data);
-
-    enum_impls.extend(to_from_str_conversions);
-
-    let sql_conversions = if is_custom_type {
-      postgres_enum_conversions(enum_name, sql_type_path, &variants_data)
-    } else {
-      sql_string_conversions(enum_name, sql_type_path)
-    };
-
-    enum_impls.extend(sql_conversions);
-
-    if !is_double_mapping && let Check::Conn(connection_func) = &conn {
-      let test_impl =  {
-        test_without_id(
-          enum_name,
-          &enum_name_str,
-          &table_path,
-          &table_name,
-          column_name,
-          db_type,
-          connection_func,
-          &variants_data,
-          skip_test,
-        )
-      };
-
-      enum_impls.extend(test_impl);
-    }
-  }
-
-  if let Some(IdMapping {
-    type_path: sql_type_path,
-    rust_type,
-  }) = id_mapping
-  {
-    let original_enum_name = enum_name;
-
-    let target_enum_name = if is_double_mapping {
-      format_ident!("{enum_name}Id")
-    } else {
-      original_enum_name.clone()
-    };
-
-    let target_enum_str = target_enum_name.to_string();
-
-    let int_to_from_sql = sql_int_conversions(
-      &target_enum_name,
-      &rust_type,
-      &sql_type_path,
-      &variants_data,
-    );
-
-    enum_impls.extend(int_to_from_sql);
-
-    let int_conversion = enum_int_conversions(&target_enum_name, &rust_type, &variants_data);
-
-    enum_impls.extend(int_conversion);
-
-    if let Check::Conn(connection_func) = &conn {
-      let test_impl = test_with_id(
-        original_enum_name,
-        &target_enum_str,
-        &table_path,
-        &table_name,
-        column_name,
-        &rust_type,
-        connection_func,
-        &variants_data,
-        skip_test,
-        is_double_mapping,
-      );
-
-      enum_impls.extend(test_impl);
-    }
-
-    if !is_double_mapping {
-      enum_impls.extend(quote! {
-        #[derive(PartialEq, Eq, Clone, Copy, Hash, Debug, diesel_enums::MappedEnum, diesel::deserialize::FromSqlRow, diesel::expression::AsExpression)]
-        #[diesel(sql_type = #sql_type_path)]
-        #orig_input
-      });
-    } else {
-      let enum_to_enum_conversion_tokens = enum_to_enum_conversion(enum_name, &variants_data);
-
-      let mut enum_copy = ast.clone();
-
-      enum_copy.ident = target_enum_name;
-
-      enum_impls.extend(quote! {
-        #[derive(PartialEq, Eq, Clone, Copy, Hash, Debug, diesel_enums::MappedEnum, diesel::deserialize::FromSqlRow, diesel::expression::AsExpression)]
-        #[diesel(sql_type = #sql_type_path)]
-        #enum_copy
-
-        #enum_to_enum_conversion_tokens
-      });
-    }
-  }
-
-  enum_impls.into()
+			quote! {
+			  #item
+			  #err
+			}
+			.into()
+		}
+	}
 }
 
-#[doc(hidden)]
-#[proc_macro_derive(MappedEnum, attributes(db_mapping))]
-pub fn derive_macro(_input: TokenStream) -> TokenStream {
-  TokenStream::new()
+/// Implements [`DbEnum`](diesel_enums::DbEnum) on an enum as well as
+/// [`FromSql`](diesel::deserialize::FromSql) and [`ToSql`](diesel::serialize::ToSql) with the target SQL type.
+///
+/// It also implements [`HasTable`](diesel::associations::HasTable) and [`Identifiable`](diesel::associations::Identifiable) for the target enum.
+///
+/// The target should implement [`Debug`](std::fmt::Debug), [`Copy`](core::marker::Copy), [`Eq`](core::cmp::Eq), [`Hash`](core::hash::Hash), [`FromSqlRow`](diesel::FromSqlRow), and [`AsExpression`](diesel::AsExpression).
+/// The [`db_enum`](macro@db_enum) attribute macro can be used to inject these derives automatically.
+///
+/// This can be used to create a mapping between a Rust enum and a database table with fixed values. For each variant, the ID is assumed to be an auto incrementing integer, but this can be overridden with variant attributes.
+///
+/// To keep the auto-incrementing inference while excluding one or many IDs, you can use the `skip_ids` attribute as explained below.
+///
+/// Unless the `skip_test` attribute is used, it generates a test that uses the [`check_db_mapping`](::diesel_enums::DbEnum::check_db_mapping) method to check if the mapping with the database is still valid.
+///
+/// # Container Attributes
+#[doc = include_str!("../docs/common_attrs.md")]
+///
+/// - `id_type/sql_type`
+///   - Example: `#[db(id_type = diesel::sql_types::BigInt)]` or `#[diesel(sql_type = diesel::sql_types::BigInt)]`
+///   - Description:
+///     - Defines the type to use for the ID mapping. It should be the corresponding type of the id column, and one of the numeric types in [`diesel::sql_types`]. <br/> When this derive is used, this attribute will be extracted by the `#[diesel(sql_type = ..)]` attribute. When the [`db_enum`](macro@db_enum) macro is used, the `#[db(..)]` attribute should be used instead. <br/> Defaults to [`diesel::sql_types::Integer`].
+///
+/// - `skip_ids`
+///   - Example: `#[db(skip_ids(10, 12..15))]`
+///   - Description:
+///     - When inferring the ID of a given variant, the macro will skip the numbers specified in this list. It can contain single numbers or closed, non-inclusive ranges.
+///
+/// - `table`
+///   - Example: `#[db(table = path::to::table)]`
+///   - Description:
+///     - The path to the corresponding table in the schema file.
+///
+/// - `table_name`
+///   - Example: `#[db(table_name = "type")]`
+///   - Description:
+///     - The name of the target table. Defaults to the last segment of the `table` path.
+///
+/// - `name_column`
+///   - Example: `#[db(name_column = custom_column)]`
+///   - Description:
+///     - Defines the column of the target table where the name of the variant is defined. Defaults to `name`.
+///
+/// # Variant Attributes
+///
+/// - `name`
+///   - Example: `#[db(name = "custom_name")]`
+///   - Description:
+///     - Overrides the `case` attribute and sets the database name for the specific variant.
+///
+/// - `id`
+///   - Example: `#[db(id = 150)]`
+///   - Description:
+///     - Sets the database ID for the specific variant.
+#[proc_macro_derive(DbEnum, attributes(db))]
+pub fn db_enum_derive_macro(input: TokenStream) -> TokenStream {
+	let item = parse_macro_input!(input as ItemEnum);
+
+	match main_logic::db_enum_derive(&item) {
+		Ok(tokens) => tokens.into(),
+		Err(e) => {
+			let err = e.into_compile_error();
+			let fallback = main_logic::db_enum_fallback_impl(&item.ident);
+
+			quote! {
+				#fallback
+				#err
+			}
+			.into()
+		}
+	}
+}
+
+/// Shortcut for deriving [`PgEnum`] on the target enum, along with the other required derives for it.
+///
+/// Derives [`FromSqlRow`](diesel::FromSqlRow), [`AsExpression`](diesel::AsExpression), [`Debug`](std::fmt::Debug), [`Copy`](core::marker::Copy), [`Eq`](core::cmp::Eq) and [`Hash`](core::hash::Hash).
+#[proc_macro_attribute]
+pub fn pg_enum(_: TokenStream, input: TokenStream) -> TokenStream {
+	let item = parse_macro_input!(input as ItemEnum);
+
+	match pg_enum::pg_enum_proc_macro(&item) {
+		Ok(tokens) => tokens.into(),
+		Err(e) => {
+			let err = e.into_compile_error();
+
+			quote! {
+			  #item
+			  #err
+			}
+			.into()
+		}
+	}
+}
+
+/// Implements [`PgEnum`](::diesel_enums::PgEnum) on an enum as well as
+/// [`FromSql`](diesel::deserialize::FromSql) and [`ToSql`](diesel::serialize::ToSql) with the target custom type.
+///
+/// The target should also implement [`Debug`](std::fmt::Debug), [`FromSqlRow`](diesel::FromSqlRow), [`AsExpression`](diesel::AsExpression).
+/// The [`pg_enum`](macro@pg_enum) attribute macro can be used to inject these derives automatically.
+///
+/// This can be used to create a mapping between a postgres enum and a Rust enum. Unless the `skip_test` attribute is used, it generates a test that uses the [`check_db_mapping`](::diesel_enums::PgEnum::check_db_mapping) method to check if the Rust variants and the postgres variants have a valid mapping.
+///
+/// **NOTE**: It is necessary to add the following to the `diesel.toml` configuration:
+///
+/// ```toml
+/// custom_type_derives = ["diesel::query_builder::QueryId"]
+/// ```
+///
+/// # Attributes
+#[doc = include_str!("../docs/common_attrs.md")]
+///
+/// - `sql_type`
+///   - Example: `#[db(sql_type = path::to::Type)]` or `#[diesel(sql_type = path::to::Type)]`
+///   - Description:
+///     - Sets the custom type to use for this enum. It should point to the type generated by `diesel_cli`, which is usually located inside a module called `sql_types` in the generated schema. <br/> Defaults to `crate::schema::sql_types::#enum_ident`. <br/> When this derive is used, this attribute will be extracted from the `#[diesel(..)]` attribute. When the [`pg_enum`](macro@pg_enum) macro is used, the `#[db(..)]` attribute must be used instead.
+///
+/// - `name`
+///   - Example: `#[db(name = "my_type")]`
+///   - Description:
+///     - The name of the enum inside postgres. Defaults to the `snake_case`d last segment of the `sql_type` path.
+#[proc_macro_derive(PgEnum, attributes(db))]
+pub fn pg_enum_derive_macro(input: TokenStream) -> TokenStream {
+	let item = parse_macro_input!(input as ItemEnum);
+
+	match pg_enum::pg_enum_derive_impl(&item) {
+		Ok(tokens) => tokens.into(),
+		Err(e) => {
+			let err = e.into_compile_error();
+			let fallback = pg_enum::pg_enum_fallback_impl(&item.ident);
+
+			quote! {
+				#fallback
+				#err
+			}
+			.into()
+		}
+	}
 }

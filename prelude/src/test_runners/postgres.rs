@@ -1,49 +1,56 @@
 use std::{env, time::Duration};
 
 use deadpool_diesel::{
-  postgres::{Manager as PgManager, Pool as PgPool},
-  Runtime,
+	Runtime,
+	postgres::{Manager, Pool},
 };
 use diesel::prelude::*;
 use dotenvy::dotenv;
 use tokio::sync::OnceCell;
 
-use crate::DbEnumError;
+use crate::*;
 
-static POSTGRES_POOL: OnceCell<deadpool_diesel::postgres::Pool> = OnceCell::const_new();
+static POSTGRES_POOL: OnceCell<Pool> = OnceCell::const_new();
 
-/// A test runner for Postgres. It uses `deadpool-diesel` to create a connection pool that can be shared among tests, so that they can be executed faster.
+/// The default (async) test runner for Postgres. It uses `deadpool-diesel` to create a connection pool that can be shared among tests, so that they can be executed faster.
 ///
 /// It requires setting the env `DATABASE_URL` (via regular env or `.env` file) to set up the connection pool.
-pub async fn postgres_runner(
-  callback: impl FnOnce(&mut PgConnection) -> Result<(), DbEnumError> + std::marker::Send + 'static,
-) -> Result<(), DbEnumError> {
-  POSTGRES_POOL
-    .get_or_init(|| async { create_pg_pool() })
-    .await
-    .get()
-    .await
-    .expect("Failed to get a connection to the Postgres database")
-    .interact(callback)
-    .await
-    .expect("Postgres testing pool thread crashed")
+///
+/// If you want the [`PgEnum`] macro invocations to use this as the `async_runner` by default, you can use the `default-pg-runner` feature.
+pub struct AsyncPgRunner;
+
+impl AsyncTestRunner<PgConnection> for AsyncPgRunner {
+	async fn run_check<F>(f: F) -> Result<(), DbEnumError>
+	where
+		F: FnOnce(&mut PgConnection) -> Result<(), DbEnumError> + Send + 'static,
+	{
+		POSTGRES_POOL
+			.get_or_init(|| async { create_pg_pool() })
+			.await
+			.get()
+			.await
+			.expect("Failed to get a connection to the Postgres database")
+			.interact(f)
+			.await
+			.expect("Postgres testing pool thread crashed")
+	}
 }
 
 #[track_caller]
-fn create_pg_pool() -> deadpool_diesel::postgres::Pool {
-  dotenv().ok();
+fn create_pg_pool() -> Pool {
+	dotenv().ok();
 
-  let database_url = env::var("DATABASE_URL")
-    .expect("Failed to set up testing pool for Postgres: DATABASE_URL is not set");
+	let database_url = env::var("DATABASE_URL")
+		.expect("Failed to set up testing pool for Postgres: DATABASE_URL is not set");
 
-  let manager = PgManager::new(database_url, Runtime::Tokio1);
+	let manager = Manager::new(database_url, Runtime::Tokio1);
 
-  PgPool::builder(manager)
-    .max_size(1)
-    .runtime(Runtime::Tokio1)
-    .wait_timeout(Some(Duration::from_secs(5)))
-    .create_timeout(Some(Duration::from_secs(5)))
-    .recycle_timeout(Some(Duration::from_secs(2)))
-    .build()
-    .expect("Failed to create the connection pool for Postgres")
+	Pool::builder(manager)
+		.max_size(16)
+		.runtime(Runtime::Tokio1)
+		.wait_timeout(Some(Duration::from_secs(5)))
+		.create_timeout(Some(Duration::from_secs(5)))
+		.recycle_timeout(Some(Duration::from_secs(2)))
+		.build()
+		.expect("Failed to create the connection pool for Postgres")
 }

@@ -1,0 +1,21 @@
+[package]
+name = "test-pg"
+edition.workspace = true
+publish = false
+
+[package.metadata.release]
+release = false
+
+[dependencies]
+diesel-enums = { path = "../prelude/", features = ["pg-async-runner"] }
+
+[dev-dependencies]
+diesel_migrations = "2.3.0"
+pgtemp = "0.6.0"
+deadpool-diesel = { version = "0.6", features = ["postgres"] }
+dotenvy = "0.15"
+diesel = { version = "2.3", features = ["postgres"] }
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true

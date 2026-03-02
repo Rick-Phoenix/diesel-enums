@@ -1,423 +1,399 @@
-use std::ops::Range;
+use crate::*;
 
-use convert_case::{Case, Casing};
-use quote::{format_ident, quote, ToTokens};
-use syn::{
-  parse::Parse, punctuated::Punctuated, Error, Expr, Ident, Lit, Meta, Path, RangeLimits, Token,
-};
-
-use crate::{Check, TokenStream2};
-
-pub struct Attributes<'a> {
-  pub table_path: Option<TokenStream2>,
-  pub table_name: Option<String>,
-  pub column: Option<String>,
-  pub conn: Check,
-  pub skip_test: bool,
-  pub case: Case<'a>,
-  pub name_mapping: Option<NameMapping>,
-  pub id_mapping: Option<IdMapping>,
-  pub skip_ranges: Vec<Range<i32>>,
+pub struct ContainerAttrs<'a> {
+	pub table_path: Path,
+	pub table_name: String,
+	pub name_column: Ident,
+	pub id_type: IdType,
+	pub skip_ranges: Vec<Range<i32>>,
+	pub common_attrs: CommonAttrs<'a>,
 }
 
-pub struct IdMapping {
-  pub type_path: TokenStream2,
-  pub rust_type: Ident,
+pub struct CommonAttrs<'a> {
+	pub test_runner: Option<TestRunner>,
+	pub case: Case<'a>,
+	pub skip_test: bool,
 }
 
-impl Default for IdMapping {
-  fn default() -> Self {
-    Self {
-      type_path: quote! { diesel::sql_types::Integer },
-      rust_type: format_ident!("i32"),
-    }
-  }
+pub enum TestRunner {
+	Sync(Path),
+	Async(Path),
 }
 
-struct SkippedRanges {
-  pub ranges: Vec<Range<i32>>,
+impl TestRunner {
+	pub fn default_runner(enum_kind: EnumKind) -> Option<Self> {
+		let is_pg_enum = enum_kind.is_pg_enum();
+
+		if cfg!(feature = "default-sqlite-runner") && !is_pg_enum {
+			Some(Self::Async(parse_quote!(::diesel_enums::AsyncSqliteRunner)))
+		} else if cfg!(feature = "default-pg-runner") {
+			Some(Self::Async(parse_quote!(::diesel_enums::AsyncPgRunner)))
+		} else if cfg!(feature = "crate-runner") {
+			Some(Self::Sync(parse_quote!(
+				crate::db_test_runner::DbTestRunner
+			)))
+		} else if cfg!(feature = "async-crate-runner") {
+			Some(Self::Async(parse_quote!(
+				crate::db_test_runner::DbTestRunner
+			)))
+		} else {
+			None
+		}
+	}
 }
 
-impl Parse for SkippedRanges {
-  fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-    let mut ranges: Vec<Range<i32>> = Vec::new();
-
-    let items = Punctuated::<Expr, Token![,]>::parse_terminated(input)?;
-
-    for item in items {
-      if let Expr::Range(range_expr) = &item {
-        let start = if let Some(start_expr) = &range_expr.start {
-          extract_i32(start_expr)?
-        } else {
-          0
-        };
-
-        let end = if let Some(end_expr) = &range_expr.end {
-          extract_i32(end_expr)?
-        } else {
-          return Err(spanned_error!(
-            range_expr,
-            "Infinite range is not supported"
-          ));
-        };
-
-        let final_end = if let RangeLimits::HalfOpen(_) = &range_expr.limits {
-          end
-        } else {
-          end + 1
-        };
-
-        ranges.push(start..final_end);
-      } else if let Expr::Lit(lit) = &item && let Lit::Int(lit_int) = &lit.lit {
-        let num = lit_int.base10_parse::<i32>()?;
-
-        ranges.push(num..num + 1);
-      } else {
-        return Err(spanned_error!(
-          item,
-          "Expected a range (e.g. `1..5`, `10..=15`)"
-        ));
-      }
-    }
-
-    ranges.sort_by_key(|range| range.start);
-
-    Ok(Self { ranges })
-  }
+#[derive(Clone, Copy)]
+pub enum EnumKind {
+	PgEnum,
+	LookupTable,
 }
 
-impl Parse for IdMapping {
-  fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-    let mut rust_type: Option<Ident> = None;
-    let mut int_type_path: Option<TokenStream2> = None;
-
-    let punctuated_args = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
-
-    let args_len = punctuated_args.len();
-
-    for arg in punctuated_args {
-      let ident = arg.path().require_ident()?;
-
-      if ident == "default" {
-        if args_len != 1 {
-          return Err(error!(
-            input.span(),
-            "Cannot use other `id_mapping` attributes when using `default`"
-          ));
-        } else {
-          return Ok(Self::default());
-        }
-      } else if ident == "sql_type" {
-        check_duplicate!(ident, rust_type, "sql_type");
-
-        let value = arg.require_name_value()?.clone().value;
-
-        let type_path = extract_path(value)?;
-
-        let type_ident = &type_path
-          .segments
-          .last()
-          .ok_or_else(|| spanned_error!(type_path.clone(), "Invalid type path"))?
-          .ident;
-
-        let type_target = if type_ident == "Integer" {
-          "i32"
-        } else if type_ident == "BigInt" {
-          "i64"
-        } else if type_ident == "SmallInt" {
-          "i16"
-        } else if type_ident == "TinyInt" {
-          "i8"
-        } else {
-          return Err(spanned_error!(
-            type_ident,
-            format!("Unknown ID type {type_ident}. Only valid integer types from `diesel::sql_types` are accepted")));
-        };
-
-        rust_type = Some(format_ident!("{type_target}"));
-        int_type_path = Some(type_path.to_token_stream());
-      } else {
-        return Err(spanned_error!(
-          ident,
-          format!("Unknown attribute `{ident}`. Expected one of: `default`, `sql_type`")
-        ));
-      }
-    }
-
-    Ok(IdMapping {
-      type_path: int_type_path.unwrap_or_else(|| quote! { diesel::sql_types::Integer }),
-      rust_type: rust_type.unwrap_or_else(|| format_ident!("i32")),
-    })
-  }
+impl EnumKind {
+	/// Returns `true` if the enum kind is [`PgEnum`].
+	///
+	/// [`PgEnum`]: EnumKind::PgEnum
+	#[must_use]
+	pub const fn is_pg_enum(self) -> bool {
+		matches!(self, Self::PgEnum)
+	}
 }
 
-pub enum NameTypes {
-  Text,
-  Custom { name: String },
+impl TestRunner {
+	pub fn generate_test(&self, enum_kind: EnumKind, enum_ident: &Ident) -> TokenStream2 {
+		let test_name = format_ident!("{}_db_enum_check", ccase!(snake, enum_ident.to_string()));
+		let method = match enum_kind {
+			EnumKind::PgEnum => quote! { check_pg_enum },
+			EnumKind::LookupTable => quote! { check_enum },
+		};
+
+		match self {
+			Self::Sync(path) => {
+				quote! {
+					#[cfg(test)]
+					#[test]
+					fn #test_name() {
+						if let Err(e) = <#path as ::diesel_enums::SyncTestRunner<_>>::#method::<#enum_ident>() {
+							panic!("{e}");
+						}
+					}
+				}
+			}
+			Self::Async(path) => {
+				quote! {
+					#[cfg(test)]
+					#[tokio::test]
+					async fn #test_name() {
+						if let Err(e) = <#path as ::diesel_enums::AsyncTestRunner<_>>::#method::<#enum_ident>().await {
+							panic!("{e}");
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
-impl NameTypes {
-  pub fn is_custom(&self) -> bool {
-    matches!(self, Self::Custom { .. })
-  }
+pub struct PgContainerAttrs<'a> {
+	pub sql_type_path: Path,
+	pub pg_enum_name: String,
+	pub common_attrs: CommonAttrs<'a>,
 }
 
-pub struct NameMapping {
-  pub db_type: NameTypes,
-  pub path: TokenStream2,
+bool_enum!(pub IsDerive);
+
+#[derive(Default)]
+pub enum IdType {
+	I8,
+	I16,
+	#[default]
+	I32,
+	I64,
 }
 
-impl Default for NameMapping {
-  fn default() -> Self {
-    Self {
-      db_type: NameTypes::Text,
-      path: quote! { diesel::sql_types::Text },
-    }
-  }
+impl IdType {
+	pub fn from_path(path: &Path) -> syn::Result<Self> {
+		let ident = path
+			.last_segment()
+			.expect("Empty path")
+			.ident
+			.to_string();
+
+		match ident.as_str() {
+			"TinyInt" => Ok(Self::I8),
+			"SmallInt" => Ok(Self::I16),
+			"Integer" => Ok(Self::I32),
+			"BigInt" => Ok(Self::I64),
+			_ => {
+				bail!(
+					path,
+					"Unknown sql type. Must be one of `TinyInt`, `SmallInt`, `Integer` or `BigInt` from `diesel::sql_types`"
+				)
+			}
+		}
+	}
+
+	pub fn rust_type(&self) -> TokenStream2 {
+		match self {
+			Self::I8 => quote! { i8 },
+			Self::I16 => quote! { i16 },
+			Self::I32 => quote! { i32 },
+			Self::I64 => quote! { i64 },
+		}
+	}
+
+	pub fn diesel_type(&self) -> TokenStream2 {
+		match self {
+			Self::I8 => quote! { ::diesel::sql_types::TinyInt },
+			Self::I16 => quote! {  ::diesel::sql_types::SmallInt },
+			Self::I32 => quote! {  ::diesel::sql_types::Integer },
+			Self::I64 => quote! {  ::diesel::sql_types::BigInt },
+		}
+	}
 }
 
-impl Parse for NameMapping {
-  fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-    let mut custom_type_path: Option<Path> = None;
-    let mut custom_enum_name: Option<String> = None;
+impl ContainerAttrs<'_> {
+	pub fn parse(
+		enum_ident: &Ident,
+		attrs: &[Attribute],
+		is_derive: IsDerive,
+	) -> syn::Result<Self> {
+		let mut table_name: Option<String> = None;
+		let mut table_path: Option<Path> = None;
+		let mut name_column: Option<Ident> = None;
+		let mut test_runner: Option<TestRunner> = None;
+		let mut case: Option<Case> = None;
+		let mut id_type: Option<IdType> = None;
+		let mut skip_ids: Option<Vec<Range<i32>>> = None;
+		let mut skip_test = false;
 
-    let punctuated_args = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
+		for attr in attrs {
+			if attr.path().is_ident("db") {
+				attr.parse_nested_meta(|meta| {
+          let ident_str = meta.ident_str()?;
 
-    let args_len = punctuated_args.len();
+          match ident_str.as_str() {
+						"skip_test" => {
+							skip_test = true;
+						}
+            "id_type" => {
+              let path = meta.parse_value::<Path>()?;
 
-    for arg in punctuated_args {
-      let ident = arg.path().require_ident()?;
-
-      if ident == "default" {
-        if args_len != 1 {
-          return Err(error!(
-            input.span(),
-            "Cannot use other `name_mapping` attributes when using `default`"
-          ));
-        } else {
-          return Ok(Self::default());
-        }
-      } else if ident == "path" {
-        check_duplicate!(ident, custom_type_path, "path");
-
-        let type_path = extract_path(arg.require_name_value()?.clone().value)?;
-
-        custom_type_path = Some(type_path);
-      } else if ident == "name" {
-        check_duplicate!(ident, custom_enum_name, "name");
-
-        let db_enum_name = extract_string_lit(&arg.require_name_value()?.value)?;
-
-        custom_enum_name = Some(db_enum_name);
-      } else {
-        return Err(spanned_error!(
-          ident,
-          format!("Unknown attribute `{ident}`. Expected one of: `default`, `path`, `name`")
-        ));
-      }
-    }
-
-    let db_type = if let Some(path) = &custom_type_path {
-      let db_name = if let Some(name) = custom_enum_name {
-        name
-      } else {
-        let rust_type_name = path
-          .segments
-          .last()
-          .ok_or_else(|| spanned_error!(path.clone(), "Invalid path attribute"))?;
-
-        // Falling back to snake cased name of custom type struct
-        rust_type_name.ident.to_string().to_case(Case::Snake)
-      };
-
-      NameTypes::Custom { name: db_name }
-    } else {
-      NameTypes::Text
-    };
-
-    Ok(NameMapping {
-      db_type,
-      path: custom_type_path.map_or_else(
-        || quote! { diesel::sql_types::Text },
-        |t| t.to_token_stream(),
-      ),
-    })
-  }
-}
-
-pub fn extract_string_lit(expr: &Expr) -> Result<String, Error> {
-  if let Expr::Lit(expr_lit) = expr && let Lit::Str(value) = &expr_lit.lit {
-    Ok(value.value())
-  } else {
-    Err(spanned_error!(expr, "Expected a string literal"))
-  }
-}
-
-pub fn extract_i32(expr: &Expr) -> Result<i32, Error> {
-  if let Expr::Lit(expr_lit) = expr && let Lit::Int(value) = &expr_lit.lit {
-    Ok(value.base10_parse()?)
-  } else {
-    Err(spanned_error!(expr, "Expected an integer literal"))
-  }
-}
-
-pub fn extract_path(expr: Expr) -> Result<Path, Error> {
-  if let Expr::Path(expr_path) = expr {
-    Ok(expr_path.path)
-  } else {
-    Err(spanned_error!(expr, "Expected a Path"))
-  }
-}
-
-impl<'a> Parse for Attributes<'a> {
-  fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-    let mut table_name: Option<String> = None;
-    let mut table_path: Option<Path> = None;
-    let mut column: Option<String> = None;
-    let mut conn: Option<Check> = None;
-    let mut case: Option<Case> = None;
-    let mut name_mapping: Option<NameMapping> = None;
-    let mut id_mapping: Option<IdMapping> = None;
-    let mut skip_test: Option<bool> = None;
-    let mut skip_ids: Option<Vec<Range<i32>>> = None;
-
-    let punctuated_args = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
-
-    let attributes_error_msg =
-      "Expected one of: `table_name`, `table`, `column`, `conn`, `skip_check`, `skip_ids`, `skip_test`, `case`, `id_mapping`, `name_mapping`";
-
-    for arg in punctuated_args {
-      match arg {
-        Meta::List(list) => {
-          let ident = list.path.require_ident()?;
-
-          if ident == "skip_ids" {
-            check_duplicate!(ident, skip_ids);
-
-            let ranges = list.parse_args::<SkippedRanges>()?;
-
-            skip_ids = Some(ranges.ranges);
-          } else if ident == "name_mapping" {
-            check_duplicate!(ident, name_mapping);
-
-            let parse_result = syn::parse2::<NameMapping>(list.tokens)?;
-
-            name_mapping = Some(parse_result);
-          } else if ident == "id_mapping" {
-            check_duplicate!(ident, id_mapping);
-
-            let parse_result = syn::parse2::<IdMapping>(list.tokens)?;
-
-            id_mapping = Some(parse_result);
-          } else {
-            return Err(spanned_error!(
-              ident,
-              format!("Unknown attribute `{ident}`. {attributes_error_msg}")
-            ));
-          }
-        }
-        Meta::Path(path) => {
-          let ident = path.require_ident()?;
-
-          if ident == "skip_check" {
-            check_duplicate!(ident, conn, "skip_check");
-
-            if matches!(conn, Some(Check::Conn(_))) {
-              return Err(spanned_error!(ident, "Cannot use `conn` with `skip_check`"));
+              id_type = Some(IdType::from_path(&path)?);
             }
+            "skip_ids" => {
+              let ranges = meta.parse_list::<ClosedRangeList>()?;
 
-            conn = Some(Check::Skip);
-          } else if ident == "skip_test" {
-            check_duplicate!(ident, skip_test);
-
-            skip_test = Some(true);
-          } else {
-            return Err(spanned_error!(
-              ident,
-              format!("Unknown attribute `{ident}`. {attributes_error_msg}")
-            ));
-          }
-        }
-        Meta::NameValue(arg) => {
-          let ident = arg.path.require_ident()?;
-          let value = arg.value;
-
-          if ident == "table" {
-            check_duplicate!(ident, table_path, "table");
-
-            table_path = Some(extract_path(value)?);
-          } else if ident == "case" {
-            check_duplicate!(ident, case);
-
-            let case_value = match extract_string_lit(&value)?.as_str()  {
-              "snake_case" => Case::Snake,
-              "UPPER_SNAKE" => Case::UpperSnake,
-              "camelCase" => Case::Camel,
-              "PascalCase" => Case::Pascal,
-              "lowercase" => Case::Lower,
-              "UPPERCASE" => Case::Upper,
-              "kebab-case" => Case::Kebab,
-              _ => return Err(spanned_error!(value, "Invalid value for `case`. Allowed values are: [ snake_case, UPPER_SNAKE, camelCase, PascalCase, lowercase, UPPERCASE, kebab-case ]"))
-            };
-
-            case = Some(case_value);
-          } else if ident == "table_name" {
-            check_duplicate!(ident, table_name);
-
-            table_name = Some(extract_string_lit(&value)?);
-          } else if ident == "column" {
-            check_duplicate!(ident, column);
-
-            column = Some(extract_string_lit(&value)?);
-          } else if ident == "conn" {
-            check_duplicate!(ident, conn);
-
-            if matches!(conn, Some(Check::Skip)) {
-              return Err(spanned_error!(ident, "Cannot use `conn` with `skip_check`"));
+              skip_ids = Some(ranges.list);
             }
+            "table" => {
+              table_path = Some(meta.parse_value::<Path>()?);
+            }
+            "table_name" => {
+              table_name = Some(meta.parse_value::<LitStr>()?.value());
+            }
+            "name_column" => {
+              name_column = Some(meta.parse_value::<Ident>()?);
+            }
+            "async_runner" => {
+              test_runner = Some(TestRunner::Async(meta.parse_value::<Path>()?));
+            }
+						"sync_runner" => {
+              test_runner = Some(TestRunner::Sync(meta.parse_value::<Path>()?));
+            }
+            "case" => {
+              let case_value = match meta.parse_value::<LitStr>()?.value().as_str() {
+                "snake_case" => Case::Snake,
+                "UPPER_SNAKE" => Case::UpperSnake,
+                "camelCase" => Case::Camel,
+                "PascalCase" => Case::Pascal,
+                "lowercase" => Case::Lower,
+                "UPPERCASE" => Case::Upper,
+                "kebab-case" => Case::Kebab,
+                _ => {
+                  return Err(error!(
+                    meta.path,
+                    "Invalid value for `case`. Allowed values are: [ snake_case, UPPER_SNAKE, camelCase, PascalCase, lowercase, UPPERCASE, kebab-case ]"
+                  ));
+                }
+              };
 
-            conn = Some(Check::Conn(extract_path(value)?.to_token_stream()));
-          } else {
-            return Err(spanned_error!(
-              ident,
-              format!("Unknown attribute `{ident}`, {attributes_error_msg}")
-            ));
-          }
-        }
-      };
-    }
+              case = Some(case_value);
+            }
+            _ => return Err(meta.error(
+              "Unknown attribute"
+            ))
+          };
 
-    let conn = if let Some(input) = conn {
-      input
-    } else {
-      return Err(error!(
-        input.span(),
-        "At least one between `conn` and `skip_check` must be present"
-      ));
-    };
+          Ok(())
+        })?;
+			} else if *is_derive && id_type.is_none() && attr.path().is_ident("diesel") {
+				attr.parse_nested_meta(|meta| {
+					if meta.path.is_ident("sql_type") {
+						let path = meta.parse_value::<Path>()?;
 
-    let is_custom_type = name_mapping.as_ref().is_some_and(|m| m.db_type.is_custom());
+						id_type = Some(IdType::from_path(&path)?);
+					}
 
-    let id_mapping = if is_custom_type { None } else { id_mapping };
+					drain_token_stream!(meta.input);
 
-    if table_name.is_none() && let Some(path) = &table_path {
-      let name = &path.segments.last().ok_or(spanned_error!(path.clone(), "Invalid table path"))?.ident;
+					Ok(())
+				})?;
+			}
+		}
 
-      table_name = Some(name.to_string());
-    }
+		if skip_test && test_runner.is_some() {
+			bail_call_site!("Cannot use `skip_test` if a runner is specified");
+		}
 
-    let table_path = table_path.map(|path| path.to_token_stream());
+		if !skip_test && test_runner.is_none() {
+			if let Some(default_runner) = TestRunner::default_runner(EnumKind::LookupTable) {
+				test_runner = Some(default_runner);
+			} else {
+				bail_call_site!(
+					"Missing test runner. If you want to use one of the default runners, enable it as a feature. If you want to skip the automatically generated test, use the `skip_test` attribute"
+				);
+			}
+		}
 
-    Ok(Attributes {
-      table_name,
-      table_path,
-      column,
-      conn,
-      case: case.unwrap_or(Case::Snake),
-      id_mapping,
-      name_mapping,
-      skip_test: skip_test.unwrap_or_default(),
-      skip_ranges: skip_ids.unwrap_or_default(),
-    })
-  }
+		let table_path = table_path.unwrap_or_else(|| {
+			let pluralized_name = format_ident!("{}s", ccase!(snake, enum_ident.to_string()));
+
+			parse_quote!( crate::schema::#pluralized_name )
+		});
+
+		let table_name = table_name.unwrap_or_else(|| {
+			table_path
+				.last_segment()
+				.expect("Empty path")
+				.ident
+				.to_string()
+		});
+
+		let name_column = name_column.unwrap_or_else(|| new_ident("name"));
+
+		Ok(ContainerAttrs {
+			table_name,
+			table_path,
+			name_column,
+			common_attrs: CommonAttrs {
+				test_runner,
+				case: case.unwrap_or(Case::Snake),
+				skip_test,
+			},
+			id_type: id_type.unwrap_or_default(),
+			skip_ranges: skip_ids.unwrap_or_default(),
+		})
+	}
+}
+
+impl PgContainerAttrs<'_> {
+	pub fn parse(
+		enum_ident: &Ident,
+		attrs: &[Attribute],
+		is_derive: IsDerive,
+	) -> syn::Result<Self> {
+		let mut pg_enum_name: Option<String> = None;
+		let mut test_runner: Option<TestRunner> = None;
+		let mut case: Option<Case> = None;
+		let mut sql_type_path: Option<Path> = None;
+		let mut skip_test = false;
+
+		for attr in attrs {
+			if attr.path().is_ident("db") {
+				attr.parse_nested_meta(|meta| {
+          let ident_str = meta.ident_str()?;
+
+          match ident_str.as_str() {
+						"skip_test" => {
+							skip_test = true;
+						}
+            "sql_type" => {
+              sql_type_path = Some(meta.parse_value::<Path>()?);
+            }
+            "name" => {
+              pg_enum_name = Some(meta.parse_value::<LitStr>()?.value());
+            }
+						"async_runner" => {
+							test_runner = Some(TestRunner::Async(meta.parse_value::<Path>()?));
+						}
+						"sync_runner" => {
+							test_runner = Some(TestRunner::Sync(meta.parse_value::<Path>()?));
+						}
+            "case" => {
+              let case_value = match meta.parse_value::<LitStr>()?.value().as_str() {
+                "snake_case" => Case::Snake,
+                "UPPER_SNAKE" => Case::UpperSnake,
+                "camelCase" => Case::Camel,
+                "PascalCase" => Case::Pascal,
+                "lowercase" => Case::Lower,
+                "UPPERCASE" => Case::Upper,
+                "kebab-case" => Case::Kebab,
+                _ => {
+                  return Err(error!(
+                    meta.path,
+                    "Invalid value for `case`. Allowed values are: [ snake_case, UPPER_SNAKE, camelCase, PascalCase, lowercase, UPPERCASE, kebab-case ]"
+                  ));
+                }
+              };
+
+              case = Some(case_value);
+            }
+            _ => return Err(meta.error(
+              "Unknown attribute"
+            ))
+          };
+
+          Ok(())
+        })?;
+			} else if *is_derive && sql_type_path.is_none() && attr.path().is_ident("diesel") {
+				attr.parse_nested_meta(|meta| {
+					if meta.path.is_ident("sql_type") {
+						let path = meta.parse_value::<Path>()?;
+						sql_type_path = Some(path);
+					}
+
+					drain_token_stream!(meta.input);
+
+					Ok(())
+				})?;
+			}
+		}
+
+		if skip_test && test_runner.is_some() {
+			bail_call_site!("Cannot use `skip_test` if a runner is specified");
+		}
+
+		if !skip_test && test_runner.is_none() {
+			if let Some(default_runner) = TestRunner::default_runner(EnumKind::PgEnum) {
+				test_runner = Some(default_runner);
+			} else {
+				bail_call_site!(
+					"Missing test runner. If you want to use one of the default runners, enable it as a feature. If you want to skip the automatically generated test, use the `skip_test` attribute"
+				);
+			}
+		}
+
+		let sql_type_path =
+			sql_type_path.unwrap_or_else(|| parse_quote!( crate::schema::sql_types::#enum_ident ));
+
+		let pg_enum_name = pg_enum_name.unwrap_or_else(|| {
+			let trailing_ident = sql_type_path
+				.last_segment()
+				.expect("Empty path")
+				.ident
+				.to_string();
+
+			ccase!(snake, trailing_ident)
+		});
+
+		Ok(PgContainerAttrs {
+			sql_type_path,
+			pg_enum_name,
+			common_attrs: CommonAttrs {
+				test_runner,
+				case: case.unwrap_or(Case::Snake),
+				skip_test,
+			},
+		})
+	}
 }

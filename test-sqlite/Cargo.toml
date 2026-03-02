@@ -1,0 +1,23 @@
+[package]
+name = "test-sqlite"
+edition.workspace = true
+publish = false
+
+[package.metadata.release]
+release = false
+
+[dependencies]
+diesel-enums = { path = "../prelude/" }
+
+[dev-dependencies]
+deadpool-diesel = { version = "0.6", features = ["sqlite"] }
+deadpool-sync = "0.1.4"
+dotenvy = "0.15"
+diesel = { version = "2.3", features = [
+  "sqlite",
+  "returning_clauses_for_sqlite_3_35",
+] }
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true

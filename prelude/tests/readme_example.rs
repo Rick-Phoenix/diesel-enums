@@ -1,29 +1,3 @@
-<!-- cargo-reedme: start -->
-
-<!-- cargo-reedme: info-start
-
-    Do not edit this region by hand
-    ===============================
-
-    This region was generated from Rust documentation comments by `cargo-reedme` using this command:
-
-        cargo +nightly reedme -p diesel-enums --features document-features
-
-    for more info: https://github.com/nik-rev/cargo-reedme
-
-cargo-reedme: info-end -->
-
- # Diesel-enums
-
- `diesel-enums` can be used to create mappings between Rust enums and database tables with fixed values, as well as custom postgres enums.
-
- It creates a seamless interface with the `diesel` API, and generates the logic to enforce the correctness of the mapping.
-
- Refer to the documentation for [`DbEnum`](https://docs.rs/diesel_enums_proc_macro/latest/diesel_enums_proc_macro/derive.PgEnum.html) and [`PgEnum`](https://docs.rs/diesel_enums_proc_macro/latest/diesel_enums_proc_macro/derive.PgEnum.html) to learn more about usage.
-
- # Full Example With Sqlite
-
-```rust
 use diesel_enums::db_enum;
 use std::{error::Error, time::Duration};
 
@@ -214,15 +188,3 @@ async fn wrong_status() {
 			.is_err()
 	)
 }
-```
-
- # Features
-* **`postgres`** —  Enables support for custom postgres enums
-* **`sqlite-async-runner`** —  Exports the test runner for sqlite
-* **`default-sqlite-runner`** —  Indicates that the sqlite runner should be used by default
-* **`pg-async-runner`** —  Exports the test runner for postgres
-* **`default-pg-runner`** —  Indicates that the postgres runner should be used by default
-* **`crate-runner`** —  Indicates that the default runner is located at `crate::db_test_runner::DbTestRunner`.
-* **`async-crate-runner`** —  Indicates that the default runner is located at `crate::db_test_runner::DbTestRunner`, and that it is an async runner.
-
-<!-- cargo-reedme: end -->

@@ -2,4 +2,4 @@
 # see https://diesel.rs/guides/configuring-diesel-cli
 
 [print_schema]
-file = "src/sqlite_tests/schema.rs"
+file = "src/tests/schema.rs"
