@@ -1,3 +1,9 @@
+## [0.2.2] - 2026-03-03
+
+### 🐛 Bug Fixes
+
+- [2015b23](https://github.com/Rick-Phoenix/diesel-enums/commit/2015b237bf203d967da18779d63f78361331201b) Improve error handling and pool setup for default runners
+
 ## [0.2.1] - 2026-03-02
 
 ### 📚 Documentation
