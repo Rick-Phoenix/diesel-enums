@@ -64,7 +64,6 @@ mod tests {
 			.runtime(Runtime::Tokio1)
 			.wait_timeout(Some(Duration::from_secs(5)))
 			.create_timeout(Some(Duration::from_secs(5)))
-			.recycle_timeout(Some(Duration::from_secs(2)))
 			.post_create(Hook::async_fn(move |conn, _metrics| {
 				Box::pin(connection_setup(conn))
 			}))
@@ -72,14 +71,17 @@ mod tests {
 			.expect("could not build the connection pool")
 	}
 
-	async fn connection_setup(conn: &SyncWrapper<SqliteConnection>) -> Result<(), HookError> {
-		let _ = conn
-			.interact(move |conn| {
-				diesel::sql_query("PRAGMA busy_timeout = 2000;").execute(conn)?;
-				diesel::sql_query("PRAGMA journal_mode = WAL;").execute(conn)?;
-				QueryResult::Ok(())
-			})
-			.await;
+	async fn connection_setup(conn: &mut SyncWrapper<SqliteConnection>) -> Result<(), HookError> {
+		conn.interact(move |conn| {
+			diesel::sql_query("PRAGMA synchronous = NORMAL;").execute(conn)?;
+			diesel::sql_query("PRAGMA busy_timeout = 5000;").execute(conn)?;
+			diesel::sql_query("PRAGMA mmap_size = 134217728;").execute(conn)?;
+			diesel::sql_query("PRAGMA cache_size = 2000;").execute(conn)?;
+			QueryResult::Ok(())
+		})
+		.await
+		.map_err(|interact_error| HookError::Message(interact_error.to_string().into()))?
+		.map_err(|query_error| HookError::Message(query_error.to_string().into()))?;
 
 		Ok(())
 	}

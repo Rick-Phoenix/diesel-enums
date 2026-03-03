@@ -36,7 +36,6 @@ impl AsyncTestRunner<PgConnection> for AsyncPgRunner {
 	}
 }
 
-#[track_caller]
 fn create_pg_pool() -> Pool {
 	dotenv().ok();
 
@@ -48,9 +47,8 @@ fn create_pg_pool() -> Pool {
 	Pool::builder(manager)
 		.max_size(16)
 		.runtime(Runtime::Tokio1)
-		.wait_timeout(Some(Duration::from_secs(5)))
 		.create_timeout(Some(Duration::from_secs(5)))
-		.recycle_timeout(Some(Duration::from_secs(2)))
+		.wait_timeout(Some(Duration::from_secs(5)))
 		.build()
 		.expect("Failed to create the connection pool for Postgres")
 }
